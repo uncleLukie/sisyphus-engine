@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+.env
+
+# Generated synthetic matches (regenerate with `sisyphus simulate`)
+data/generated/
