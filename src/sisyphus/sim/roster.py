@@ -69,10 +69,10 @@ class TeamProfile:
 
 # Mean attribute values by position: speed, accel, endurance, pass, finish, tackle, dribble
 _POSITION_MEANS: dict[str, tuple[float, ...]] = {
-    "GK": (7.2, 5.0, 1.10, 0.55, 0.10, 0.20, 0.20),
-    "DF": (8.4, 6.0, 1.00, 0.62, 0.25, 0.72, 0.45),
-    "MF": (8.5, 6.3, 1.05, 0.75, 0.45, 0.58, 0.62),
-    "FW": (8.9, 6.6, 0.95, 0.66, 0.72, 0.35, 0.72),
+    "GK": (7.6, 5.0, 1.10, 0.55, 0.10, 0.20, 0.20),
+    "DF": (9.0, 6.0, 1.00, 0.62, 0.25, 0.72, 0.45),
+    "MF": (9.1, 6.3, 1.05, 0.75, 0.45, 0.58, 0.62),
+    "FW": (9.5, 6.6, 0.95, 0.66, 0.72, 0.35, 0.72),
 }
 _ATTR_SPREAD = (0.35, 0.40, 0.06, 0.07, 0.08, 0.07, 0.08)
 
@@ -122,9 +122,7 @@ def _build_team(
     overrides = overrides or {}
 
     def build(rows: list[tuple[int, str, Position]]) -> tuple[PlayerProfile, ...]:
-        return tuple(
-            _make_player(rng, team_id, num, nm, pos, overrides.get(num)) for num, nm, pos in rows
-        )
+        return tuple(_make_player(rng, team_id, num, nm, pos, overrides.get(num)) for num, nm, pos in rows)
 
     return TeamProfile(
         team_id=team_id,
@@ -173,7 +171,7 @@ KINGSMERE = _build_team(
     team_id="KMR",
     name="Kingsmere Rovers",
     short_name="Kingsmere",
-    colors=("#1b2a49", "#f2c14e"),
+    colors=("#2f6df6", "#f2c14e"),
     formation="4-4-2",
     starters=[
         (1, "Viktor Hale", "GK"),
@@ -196,7 +194,7 @@ KINGSMERE = _build_team(
         (19, "Ravi Lockhart", "FW"),
     ],
     # Kai Montrose is the rapid impact substitute the scenario relies on.
-    overrides={14: {"top_speed": 9.6, "acceleration": 7.2, "dribbling": 0.82, "finishing": 0.74}},
+    overrides={14: {"top_speed": 10.2, "acceleration": 7.2, "dribbling": 0.82, "finishing": 0.74}},
 )
 
 TEAMS: dict[str, TeamProfile] = {t.team_id: t for t in (HARBOURSIDE, KINGSMERE)}

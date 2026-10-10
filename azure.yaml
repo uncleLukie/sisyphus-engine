@@ -1,0 +1,23 @@
+# Azure Developer CLI project: `azd up` builds the image, provisions
+# infra/main.bicep (Container Apps + Foundry model deployment) and deploys both roles.
+name: sisyphus-engine
+metadata:
+  template: sisyphus-engine@0.1.0
+infra:
+  provider: bicep
+  path: infra
+services:
+  api:
+    project: .
+    language: python
+    host: containerapp
+    docker:
+      path: Dockerfile
+      remoteBuild: true
+  ui:
+    project: .
+    language: python
+    host: containerapp
+    docker:
+      path: Dockerfile
+      remoteBuild: true

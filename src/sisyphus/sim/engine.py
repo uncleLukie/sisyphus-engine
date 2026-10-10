@@ -161,9 +161,7 @@ class MatchSimulator:
         self.team_of = np.repeat([0, 1], 11)
         self.is_gk = np.zeros(N, dtype=bool)
         self.is_gk[[0, 11]] = True
-        self.anchors = np.vstack(
-            [FORMATIONS[scenario.home.formation], FORMATIONS[scenario.away.formation]]
-        )
+        self.anchors = np.vstack([FORMATIONS[scenario.home.formation], FORMATIONS[scenario.away.formation]])
         self._load_attributes()
 
         self.pos = np.zeros((N, 2))
@@ -287,6 +285,9 @@ class MatchSimulator:
         self.period_end_t = self.scenario.period_seconds + float(stoppage)
         if period == 2:
             self.stamina.halftime(self.e_short, self.e_long)
+        # Per-period clocks restart at zero, so per-player timers must too.
+        self.last_pressure_t[:] = -99.0
+        self.tackle_cooldown[:] = 0.0
         kicking = 0 if period == 1 else 1
         self._kickoff_positions(kicking)
         self.possession_team = -1
@@ -365,10 +366,10 @@ class MatchSimulator:
         b = self.ball
         will = self.stamina.willingness(self.e_short, self.e_long)
         targets = np.empty((N, 2))
-        urgency = np.full(N, 0.42)
+        urgency = np.full(N, 0.36)
 
         # Ornstein-Uhlenbeck jitter around tactical targets (GKs jitter less).
-        tau, sigma = 6.0, 3.2
+        tau, sigma = 8.0, 1.5
         self.noise += -self.noise * DT / tau + sigma * math.sqrt(2 * DT / tau) * self.rng.standard_normal((N, 2))
         noise = self.noise.copy()
         noise[self.is_gk] *= 0.25
@@ -387,10 +388,11 @@ class MatchSimulator:
                 # Recovery runs: defenders far from their slot run harder if willing.
                 if not in_poss:
                     far = np.linalg.norm(targets[sl] - self.pos[sl], axis=1) > 8.0
-                    urgency[sl] = np.where(far, 0.45 + 0.4 * will[sl], urgency[sl])
+                    urgency[sl] = np.where(far, 0.4 + 0.38 * will[sl], urgency[sl])
                 else:
                     far = np.linalg.norm(targets[sl] - self.pos[sl], axis=1) > 10.0
-                    urgency[sl] = np.where(far, 0.62, urgency[sl])
+                    urgency[sl] = np.where(far, 0.55, urgency[sl])
+                    self._runs_in_behind(k, ball_tf, targets, urgency, will)
 
         if b.state == BallState.OWNED:
             self._carrier_and_press_targets(targets, urgency, will)
@@ -418,6 +420,34 @@ class MatchSimulator:
 
         return targets, urgency
 
+    def _runs_in_behind(
+        self, k: int, ball_tf: np.ndarray, targets: np.ndarray, urgency: np.ndarray, will: np.ndarray
+    ) -> None:
+        """Forwards of the team in possession attack the space behind the opponent's last line.
+
+        Direct teams do this more aggressively. It is the mechanism that punishes a
+        high defensive line held by tired defenders: fresh runners get beyond it.
+        """
+        style = self.styles[k]
+        opp_sl = self._team_slice(1 - k)
+        opp_idx = np.arange(opp_sl.start, opp_sl.stop)[~self.is_gk[opp_sl]]
+        opp_x = pitch.to_team_frame(self.pos[opp_idx], k)[:, 0]
+        back_line = float(np.sort(opp_x)[-2])  # second-deepest outfielder: the real line
+        # Only worth it against a genuinely high line (no offside is modelled, so a
+        # deep block must not be exploitable by simply standing behind it).
+        if back_line < float(ball_tf[0]) + 0.08 or back_line > 0.62:
+            return
+        sl = self._team_slice(k)
+        anchors_x = self.anchors[sl][:, 0]
+        runners = np.argsort(anchors_x)[-2:] + sl.start  # two most advanced slots
+        for r in runners:
+            if self.ball.state == BallState.OWNED and self.ball.owner == r:
+                continue
+            tf = pitch.to_team_frame(self.pos[r], k)
+            tf[0] = min(back_line + 0.04, 0.72)
+            targets[r] = pitch.from_team_frame(tf, k)
+            urgency[r] = 0.4 + 0.55 * style.directness * will[r]
+
     def _carrier_and_press_targets(self, targets: np.ndarray, urgency: np.ndarray, will: np.ndarray) -> None:
         b = self.ball
         c = b.owner
@@ -435,7 +465,19 @@ class MatchSimulator:
             direction += 0.9 * (away / (d_opp + 1e-9)) * (5.0 - d_opp) / 5.0
         direction /= np.linalg.norm(direction) + 1e-9
         targets[c] = np.clip(self.pos[c] + direction * 6.0, [1, 1], [pitch.LENGTH - 1, pitch.WIDTH - 1])
-        urgency[c] = 0.55
+        # A carrier slows down when a defender is set in front of them, and drives
+        # into open space when nobody is: this is what makes counters punish a tired line.
+        opp_sl = self._team_slice(1 - k)
+        rel = self.pos[opp_sl] - self.pos[c]
+        rel_d = np.linalg.norm(rel, axis=1)
+        n_ahead = int(((rel_d < 9.0) & ((rel @ fwd) > 0.3 * rel_d)).sum())
+        tf_x = float(pitch.to_team_frame(self.pos[c], k)[0])
+        if n_ahead == 0 and 0.45 < tf_x < 0.85:
+            urgency[c] = 0.72
+        elif float(np.dot(-away, fwd)) > 0.0 and d_opp < 3.5:
+            urgency[c] = 0.3
+        else:
+            urgency[c] = 0.5
 
         # Pressing by the defending team.
         d = 1 - k
@@ -444,19 +486,27 @@ class MatchSimulator:
         lo, hi = style.press_zone
         in_zone = lo <= ball_tf_x <= hi
         n_press = style.press_players if in_zone else 0
-        cands = self._nearest(self.pos[c], d, exclude_gk=True, n=max(n_press, 1))
+        cands = self._nearest(self.pos[c], d, exclude_gk=True, n=max(n_press, 1) + 2)
         anticipation = self.pos[c] + self.vel[c] * 0.4
+        own_goal = pitch.defending_goal(d)
+        v = own_goal - self.pos[c]
+        goal_side = v / (np.linalg.norm(v) + 1e-9)
         for i, p in enumerate(cands):
             dist = float(np.linalg.norm(self.pos[p] - self.pos[c]))
-            if i < n_press and (i == 0 or (will[p] > 0.5 and dist < 22.0)):
+            # Pressing is a choice: exhausted players drop into containment instead.
+            # This is the mechanism by which a high press visibly decays.
+            commits = will[p] > 0.35 if i == 0 else (will[p] > 0.5 and dist < 22.0)
+            if i < n_press and commits:
                 targets[p] = anticipation
-                urgency[p] = 0.55 + 0.45 * will[p]
+                urgency[p] = 0.5 + 0.45 * will[p]
             elif i == 0:
-                # Containment: stand off goal-side of the carrier.
-                own_goal = pitch.defending_goal(d)
-                v = own_goal - self.pos[c]
-                targets[p] = self.pos[c] + v / (np.linalg.norm(v) + 1e-9) * 3.0
-                urgency[p] = 0.5
+                # Containment: the nearest defender always gets goal-side of the carrier.
+                targets[p] = self.pos[c] + goal_side * 2.0
+                urgency[p] = 0.5 + 0.25 * will[p]
+            elif dist < 14.0 and ball_tf_x < 0.5:
+                # Cover: nearby defenders in their own half screen the lane to goal.
+                targets[p] = self.pos[c] + goal_side * (5.0 + 2.5 * i)
+                urgency[p] = 0.42 + 0.25 * will[p]
 
     def _nearest(self, point: np.ndarray, team: int, exclude_gk: bool, n: int) -> list[int]:
         sl = self._team_slice(team)
@@ -466,13 +516,32 @@ class MatchSimulator:
         d = np.linalg.norm(self.pos[idx] - point, axis=1)
         return [int(i) for i in idx[np.argsort(d)[:n]]]
 
+    def _keep_outfield_out_of_goal_areas(self, targets: np.ndarray) -> None:
+        """Outfield players do not camp in the six-yard box (or the goal mouth).
+
+        Positional targets that land inside either goal area are pushed to its
+        edge unless the player is already on the ball or chasing it there.
+        """
+        gk = np.zeros(len(targets), dtype=bool)
+        gk[0] = gk[11] = True
+        near_ball = np.linalg.norm(self.pos - self.ball.xy, axis=1) < 3.0
+        half_w = pitch.GOAL_AREA_WIDTH / 2
+        depth = pitch.GOAL_AREA_DEPTH + 0.5
+        in_y = np.abs(targets[:, 1] - pitch.WIDTH / 2) < half_w
+        left = (targets[:, 0] < depth) & in_y & ~gk & ~near_ball
+        right = (targets[:, 0] > pitch.LENGTH - depth) & in_y & ~gk & ~near_ball
+        targets[left, 0] = depth
+        targets[right, 0] = pitch.LENGTH - depth
+
     def _move_players(self, targets: np.ndarray, urgency: np.ndarray) -> None:
         vmax = self.stamina.speed_cap(self.top_speed, self.e_short, self.e_long)
         amax = self.stamina.accel_cap(self.accel, self.e_short, self.e_long)
+        self._keep_outfield_out_of_goal_areas(targets)
         delta = targets - self.pos
         dist = np.linalg.norm(delta, axis=1)
         direction = delta / (dist[:, None] + 1e-9)
-        desired_speed = np.minimum(urgency * vmax, 1.25 * dist)
+        # Players settle rather than oscillate: speed tapers off within ~1.5 m of target.
+        desired_speed = np.minimum(urgency * vmax, 0.8 * dist)
         dv = direction * desired_speed[:, None] - self.vel
         dv_norm = np.linalg.norm(dv, axis=1)
         limit = amax * DT
@@ -639,7 +708,9 @@ class MatchSimulator:
         foul_p = 0.09 + 0.16 * (1.0 - self.e_long[opp])
         if self.rng.random() < foul_p:
             card = self.rng.random() < 0.12
-            self._emit(EventType.FOUL, slot=opp, outcome="fail", qualifiers={"fouled": self.profiles[c].player_id}, **common)
+            self._emit(
+                EventType.FOUL, slot=opp, outcome="fail", qualifiers={"fouled": self.profiles[c].player_id}, **common
+            )
             if card:
                 self._emit(EventType.CARD, slot=opp, qualifiers={"card": "yellow"}, **common)
             self.tackle_cooldown[opp] = 3.0
@@ -652,8 +723,13 @@ class MatchSimulator:
             + 0.1 * (self.e_long[opp] - self.e_long[c])
         )
         won = self.rng.random() < float(np.clip(p_win, 0.1, 0.85))
-        self._emit(EventType.TACKLE, slot=opp, outcome="success" if won else "fail",
-                   qualifiers={"opponent": self.profiles[c].player_id}, **common)
+        self._emit(
+            EventType.TACKLE,
+            slot=opp,
+            outcome="success" if won else "fail",
+            qualifiers={"opponent": self.profiles[c].player_id},
+            **common,
+        )
         self.tackle_cooldown[opp] = 2.0
         if not won:
             self.vel[opp] *= 0.2
@@ -676,14 +752,22 @@ class MatchSimulator:
         self._restart_kind = None
 
         options: list[tuple[str, int, float, float]] = []  # (kind, target, utility, prob)
+        opp_sl = self._team_slice(1 - k)
+        opp_pos = self.pos[opp_sl]
         dist_goal = float(np.linalg.norm(pitch.attacking_goal(k) - self.pos[c]))
         if dist_goal < 30 and restart in (None, "free_kick"):
             xg = models.expected_goals(self.pos[c], k, pressure, self.finishing[c])
-            if xg > 0.025:
-                options.append(("shot", -1, xg * 1.25, xg))
+            if xg > 0.04:
+                # Shooting is valued above its raw xG: a shot ends the possession on the
+                # attacker's terms, whereas carrying on risks a turnover in a dangerous area.
+                options.append(("shot", -1, xg * 1.9, xg))
 
-        opp_sl = self._team_slice(1 - k)
-        opp_pos = self.pos[opp_sl]
+        # Congestion ahead of the carrier (opponents within 6 m in the forward cone).
+        fwd = np.array([1.0 if k == 0 else -1.0, 0.0])
+        rel = opp_pos - self.pos[c]
+        rel_d = np.linalg.norm(rel, axis=1)
+        ahead = (rel_d < 6.0) & ((rel @ fwd) > 0.3 * rel_d)
+        n_ahead = int(ahead.sum())
         for j in range(11 * k, 11 * k + 11):
             if j == c:
                 continue
@@ -696,8 +780,7 @@ class MatchSimulator:
             lane_d = lane_d[lane_t > 0.05]
             lane = float(lane_d.min()) if lane_d.size else 10.0
             space = float(np.linalg.norm(opp_pos - self.pos[j], axis=1).min())
-            p = models.pass_success_prob(d, lane, space, pressure, self.passing[c],
-                                         self.e_short[c], self.e_long[c])
+            p = models.pass_success_prob(d, lane, space, pressure, self.passing[c], self.e_short[c], self.e_long[c])
             tf_j = pitch.to_team_frame(self.pos[j], k)
             gain = models.possession_value(tf_j)
             directness = 1.0 + style.directness * max(0.0, float(tf_j[0] - tf_c[0])) * 1.5
@@ -705,9 +788,12 @@ class MatchSimulator:
             options.append(("pass", j, util, p))
 
         if restart is None:
-            keep = 0.92 - 0.35 * pressure
+            keep = float(
+                np.clip(0.92 - 0.35 * pressure - 0.18 * n_ahead + 0.15 * (self.dribbling[c] - 0.5), 0.15, 0.95)
+            )
             fwd_tf = np.clip(tf_c + np.array([0.05, 0.0]), 0, 1)
-            options.append(("dribble", -1, keep * models.possession_value(fwd_tf) * 0.9, keep))
+            util = keep * models.possession_value(fwd_tf) * 0.9 - (1 - keep) * 0.55 * models.turnover_cost(tf_c)
+            options.append(("dribble", -1, util, keep))
 
         if not options:
             self.decision_timer = 0.4
@@ -722,7 +808,36 @@ class MatchSimulator:
         elif kind == "pass":
             self._play_pass(c, target, k, pressure, prob, restart)
         else:
+            self._dribble(c, k, prob)
             self.decision_timer = float(self.rng.uniform(0.6, 1.6)) / style.tempo
+
+    def _dribble(self, c: int, k: int, keep: float) -> None:
+        """Attempt to carry the ball on; a failed take-on is dispossessed by the closest opponent."""
+        if self.rng.random() < keep:
+            return
+        opp = self._nearest(self.pos[c], 1 - k, exclude_gk=True, n=1)[0]
+        if float(np.linalg.norm(self.pos[opp] - self.pos[c])) > 4.0:
+            return
+        xy = self.pos[c]
+        self._emit(
+            EventType.TACKLE,
+            slot=opp,
+            outcome="success",
+            start_x=round(float(xy[0]), 2),
+            start_y=round(float(xy[1]), 2),
+            qualifiers={"opponent": self.profiles[c].player_id, "take_on": True},
+        )
+        self.tackle_cooldown[opp] = 2.0
+        self.vel[c] *= 0.3
+        if self.rng.random() < 0.6:
+            self._give_ball(opp, "tackle")
+        else:
+            b = self.ball
+            b.state = BallState.LOOSE
+            b.owner = -1
+            ang = self.rng.uniform(0, 2 * math.pi)
+            b.vel = np.array([math.cos(ang), math.sin(ang)]) * self.rng.uniform(3, 7)
+            b.last_touch_team = 1 - k
 
     def _play_pass(self, c: int, j: int, k: int, pressure: float, prob: float, restart: RestartKind | None) -> None:
         start = self.pos[c].copy()
@@ -757,9 +872,20 @@ class MatchSimulator:
         self.ball.owner = -1
         self.ball.last_touch_team = k
         self.ball.flight = _Flight(
-            kind="pass", passer=c, start=start, target=target, v0=v0, decel=decel,
-            duration=max(duration, DT), t_start=self.t, intended=intended, success=success,
-            success_prob=prob, restart=restart, under_pressure=pressure > 0.33, receiver_hint=j,
+            kind="pass",
+            passer=c,
+            start=start,
+            target=target,
+            v0=v0,
+            decel=decel,
+            duration=max(duration, DT),
+            t_start=self.t,
+            intended=intended,
+            success=success,
+            success_prob=prob,
+            restart=restart,
+            under_pressure=pressure > 0.33,
+            receiver_hint=j,
         )
 
     def _pass_event(self, f: _Flight, outcome: str, end: np.ndarray, receiver: int | None) -> None:
@@ -779,8 +905,7 @@ class MatchSimulator:
             pass_distance_m=round(float(np.linalg.norm(end - f.start)), 2),
             ball_speed_mps=round(f.v0, 2),
             success_prob=round(f.success_prob, 3),
-            qualifiers={"intended_receiver": self.profiles[f.receiver_hint].player_id,
-                        "lofted": f.decel < 1.0},
+            qualifiers={"intended_receiver": self.profiles[f.receiver_hint].player_id, "lofted": f.decel < 1.0},
         )
 
     def _resolve_pass_arrival(self, f: _Flight) -> None:
@@ -790,8 +915,13 @@ class MatchSimulator:
             same_team = self.team_of[f.intended] == k
             self._pass_event(f, "success" if same_team else "fail", end, f.intended if same_team else None)
             if not same_team:
-                self._emit(EventType.INTERCEPTION, slot=f.intended, outcome="success",
-                           start_x=round(float(end[0]), 2), start_y=round(float(end[1]), 2))
+                self._emit(
+                    EventType.INTERCEPTION,
+                    slot=f.intended,
+                    outcome="success",
+                    start_x=round(float(end[0]), 2),
+                    start_y=round(float(end[1]), 2),
+                )
                 self._give_ball(f.intended, "interception")
             else:
                 self._give_ball(f.intended, "pass")
@@ -845,9 +975,18 @@ class MatchSimulator:
         self.ball.owner = -1
         self.ball.last_touch_team = k
         self.ball.flight = _Flight(
-            kind="shot", passer=c, start=start, target=target, v0=speed, decel=decel,
-            duration=max(duration, DT), t_start=self.t,
-            under_pressure=pressure > 0.33, shot_outcome=outcome, xg=xg, receiver_hint=c,
+            kind="shot",
+            passer=c,
+            start=start,
+            target=target,
+            v0=speed,
+            decel=decel,
+            duration=max(duration, DT),
+            t_start=self.t,
+            under_pressure=pressure > 0.33,
+            shot_outcome=outcome,
+            xg=xg,
+            receiver_hint=c,
         )
 
     def _resolve_shot(self, f: _Flight) -> None:
@@ -867,8 +1006,10 @@ class MatchSimulator:
             under_pressure=f.under_pressure,
             xg=round(f.xg, 3),
             ball_speed_mps=round(f.v0, 2),
-            qualifiers={"shot_outcome": f.shot_outcome or "",
-                        "distance_m": round(float(np.linalg.norm(pitch.attacking_goal(k) - f.start)), 1)},
+            qualifiers={
+                "shot_outcome": f.shot_outcome or "",
+                "distance_m": round(float(np.linalg.norm(pitch.attacking_goal(k) - f.start)), 1),
+            },
         )
         gk = 11 * (1 - k)
         if f.shot_outcome == "goal":
@@ -877,8 +1018,13 @@ class MatchSimulator:
             centre = np.array([pitch.LENGTH / 2, pitch.WIDTH / 2])
             self._setup_dead_ball("kickoff", 1 - k, centre, delay=float(self.rng.uniform(35, 50)))
         elif f.shot_outcome == "saved":
-            self._emit(EventType.KEEPER_SAVE, slot=gk, outcome="success",
-                       start_x=round(float(self.pos[gk][0]), 2), start_y=round(float(self.pos[gk][1]), 2))
+            self._emit(
+                EventType.KEEPER_SAVE,
+                slot=gk,
+                outcome="success",
+                start_x=round(float(self.pos[gk][0]), 2),
+                start_y=round(float(self.pos[gk][1]), 2),
+            )
             if self.rng.random() < 0.65:
                 self._give_ball(gk, "save")
             else:

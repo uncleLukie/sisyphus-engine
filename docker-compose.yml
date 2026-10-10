@@ -1,0 +1,20 @@
+services:
+  api:
+    build: .
+    command: ["sisyphus", "serve", "--port", "8000"]
+    ports: ["8000:8000"]
+    env_file: [.env]
+    environment:
+      SISYPHUS_DATA_DIR: /app/data/generated
+    volumes:
+      - match-data:/app/data/generated
+  ui:
+    build: .
+    command: ["sisyphus", "ui", "--port", "8501", "--api", "http://api:8000"]
+    ports: ["8501:8501"]
+    environment:
+      SISYPHUS_API_URL: http://api:8000
+      HEALTH_URL: http://localhost:8501/_stcore/health
+    depends_on: [api]
+volumes:
+  match-data:

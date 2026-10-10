@@ -54,7 +54,26 @@ PRESS_COLLAPSE = Scenario(
     default_seed=7,
 )
 
-SCENARIOS: dict[str, Scenario] = {s.scenario_id: s for s in (PRESS_COLLAPSE,)}
+MIRROR_MATCH = Scenario(
+    scenario_id="mirror_match",
+    title="Both Teams Press",
+    description=(
+        "A control scenario: both sides press high. With no low block to hide "
+        "behind, fatigue hits whichever squad has the thinner stamina profile first, "
+        "and the analytics must find the breakpoint without a scripted narrative."
+    ),
+    home=KINGSMERE,
+    away=HARBOURSIDE,
+    home_style=HIGH_PRESS,
+    away_style=HIGH_PRESS,
+    substitutions=(
+        SubstitutionPlan(minute=66, team_id="HAR", out_number=8, in_number=14),
+        SubstitutionPlan(minute=72, team_id="KMR", out_number=11, in_number=14),
+    ),
+    default_seed=11,
+)
+
+SCENARIOS: dict[str, Scenario] = {s.scenario_id: s for s in (PRESS_COLLAPSE, MIRROR_MATCH)}
 
 
 def get_scenario(scenario_id: str) -> Scenario:

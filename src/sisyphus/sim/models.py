@@ -22,7 +22,7 @@ def expected_goals(xy: np.ndarray, team: int, pressure: float, finishing: float)
     """Shot conversion probability from distance, goal angle and pressure."""
     dist = float(np.linalg.norm(pitch.attacking_goal(team) - xy))
     angle = pitch.goal_angle(xy, team)
-    z = -1.15 + 1.45 * angle - 0.105 * dist - 0.55 * pressure + 0.6 * (finishing - 0.5)
+    z = -1.35 + 1.45 * angle - 0.105 * dist - 0.55 * pressure + 0.6 * (finishing - 0.5)
     return sigmoid(z)
 
 
@@ -41,7 +41,7 @@ def pass_success_prob(
     fatigue all reduce completion probability.
     """
     z = (
-        0.55
+        0.85
         + 1.6 * passing
         - 0.048 * distance
         - 1.0 * pressure

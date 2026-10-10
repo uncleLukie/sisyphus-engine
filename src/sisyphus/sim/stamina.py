@@ -28,8 +28,8 @@ class StaminaModel:
     long_drain: float = 1.25e-4  # per unit metabolic load per second
     accel_cost: float = 0.12  # metabolic load per m/s^2 of acceleration
     halftime_long_recovery: float = 0.06
-    willingness_midpoint: float = 0.55  # e_long at which willingness halves
-    willingness_width: float = 0.055
+    willingness_midpoint: float = 0.52  # e_long at which willingness halves
+    willingness_width: float = 0.10  # wide enough for a gradual decline, not a cliff
 
     def step(
         self,

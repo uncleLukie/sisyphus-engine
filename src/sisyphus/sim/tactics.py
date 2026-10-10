@@ -104,9 +104,7 @@ LOW_BLOCK_COUNTER = TeamStyle(
 STYLES: dict[str, TeamStyle] = {s.name: s for s in (HIGH_PRESS, LOW_BLOCK_COUNTER)}
 
 
-def shape_targets(
-    anchors: np.ndarray, in_possession: bool, ball_tf: np.ndarray, style: TeamStyle
-) -> np.ndarray:
+def shape_targets(anchors: np.ndarray, in_possession: bool, ball_tf: np.ndarray, style: TeamStyle) -> np.ndarray:
     """Target positions (team frame) for all 11 slots given the ball position.
 
     The block slides with the ball: its back line sits ``block_gap`` behind the
